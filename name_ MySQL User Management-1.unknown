@@ -1,0 +1,195 @@
+name: MySQL User Management
+
+on:
+
+  workflow_dispatch:
+    inputs:
+      tenant:
+        description: 'Tenant'
+        type: choice
+        required: true
+        options:
+          - 'bk-kw'
+          - 'bp-ca'
+          - 'br-us'
+          - 'ck-ph'
+          - 'enp-us'
+          - 'gfp-us'
+          - 'jb-ph'
+          - 'pc-gt'
+          - 'por-us'
+          - 'pp5-us'
+          - 'pcs'
+          - 'snd'
+      platform:
+        description: 'Platform'
+        type: choice
+        required: true
+        options:
+          - 'dev-a'
+          - 'dev-b'
+          - 'dev-c'
+          - 'qa-a'
+          - 'qa-b'
+          - 'qa-c'
+          - 'loadtest'
+          - 'demo-a'
+          - 'demo-b'
+          - 'demo-c'
+          - 'prod'
+      region:
+        description: 'Region (demo/prod)'
+        type: choice
+        required: true
+        options:
+          - 'us-east-1'
+          - 'eu-west-1'
+          - 'ap-southeast-1'
+      action:
+        description: 'Action'
+        type: choice
+        required: true
+        options:
+         - 'list-users'
+         - 'add-user'
+         - 'drop-user'
+      role:
+        description: 'role'
+        type: choice
+        required: true
+        options:
+         - 'admin'
+         - 'developer'
+         - 'readonly'
+      username:
+        description: 'Database username'
+      password:
+        description: 'Database password'
+        
+concurrency:
+  group: "MYSQL:USERS:${{ inputs.tenant }}-${{ inputs.platform }}"
+  cancel-in-progress: false
+
+jobs:
+  mysql_users:
+    name: "MYSQL:USERS:${{ inputs.action }} ${{ inputs.tenant }} ${{ inputs.platform }} ${{ inputs.region }} ${{ inputs.username }}"
+    runs-on: tillster-self-hosted-e
+    environment: mysql_users
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "TEST:CONFIG-VAULT:FILE"
+        run: |
+          vaultfile=""
+          vaultpath=""
+          # Check if the tenant equals "pcs" or "snd"
+          if [ "${{ inputs.tenant }}" == "pcs" ] || [ "${{ inputs.tenant }}" == "snd" ]; then
+              vaultfile="vault/${{ inputs.platform }}/${{ inputs.tenant }}-${{ inputs.region }}.json"
+              vaultpath="${{ inputs.tenant }}-${{ inputs.region }}"             
+          else
+              vaultfile="vault/${{ inputs.platform }}/${{ inputs.tenant }}.json"
+              vaultpath="${{ inputs.tenant }}-${{ inputs.platform }}"
+          fi
+          # test the vaultfile
+          if [ ! -f "${vaultfile}" ]; then
+            echo "ERROR: config vault file does not exist: ${vaultfile}"
+            exit 1
+          fi
+          echo "vaultfile=${vaultfile}" >> $GITHUB_ENV
+          echo "vaultpath=${vaultpath}" >> $GITHUB_ENV
+      - name: Debug Environment Variables
+        run: |
+          echo "vault_file=${{ env.vault_file }}"
+          echo "vault_path=${{ env.vault_path }}"
+          echo "mysql_host=${{ env.mysql_host }}"
+          echo "root_user=${{ env.database_username_root_user }}"
+          echo "root_password=${{ env.database_username_root_password }}"
+          
+      - name: "UTILITY:INSTALL:TOOLS"
+        uses: tillster/github-actions/utility_configure_base_build_pipeline@v1
+      
+      - name: "CHOOSE:CONFIG:FILE"
+        run: |
+          config_file=""
+          case "${{ inputs.platform }}" in
+            'dev-a' | 'dev-b' | 'dev-c' )
+              echo "config_file=mysql_users_dev.json" >> $GITHUB_ENV
+              ;;
+            'qa-a' | 'qa-b' | 'qa-c' )
+              echo "config_file=mysql_users_qa.json" >> $GITHUB_ENV
+              ;;
+            'loadtest' )
+              echo "config_file=mysql_users_loadtest.json" >> $GITHUB_ENV
+              ;;
+            'demo-a' | 'demo-b' | 'demo-c' )
+              echo "config_file=mysql_users_demo-${{ inputs.region }}.json" >> $GITHUB_ENV
+              ;;
+            'prod' )
+              echo "config_file=mysql_users_prod-${{ inputs.region }}.json" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "ERROR: Unsupported platform value: ${{ inputs.platform }}"
+              exit 1
+              ;;
+          esac
+      - name: "TEST:CONFIG:FILE"
+        run: |
+          if [ ! -f ".github/workflows/configuration/${{ env.config_file }}" ]; then
+            echo "ERROR: config file does not exist: .github/workflows/configuration/${{ env.config_file }}"
+            exit 1
+          fi
+        
+      - name: "ENV:MAP:JSON:FILE"
+        uses: tillster/github-actions/utility_map_env_json@v1
+        with:
+          json_mapping_file_location: ".github/workflows/configuration/${{ env.config_file }}"
+          mask: "false"
+
+      - name: "AWS:EKS:PULL:KUBECONFIG"
+        uses: tillster/github-actions/aws_pull_eks_kube_config@v1
+        with:
+          cluster_name: "${{ env.kubernetes_cluster_name }}"
+          aws_region: "${{ env.aws_region }}"
+          location: "${{ env.generated_kubeconfig }}"
+
+      - name: "MAP:VAULT:SECRETS"
+        uses: tillster/github-actions/utility_map_vault_secrets@v1
+        with:
+          secret_server_username: "${{ secrets.THYCOTIC_SECRET_SERVER_USERNAME }}"
+          secret_server_password: "${{ secrets.THYCOTIC_SECRET_SERVER_PASSWORD }}"
+          vault_pod: "${{ env.vault_pod }}"
+          vault_namespace: "${{ env.vault_namespace }}"
+          vault_token: "${{ secrets.TILLSTER_VAULT_TOKEN }}"
+          kubeconfig: "${{ env.generated_kubeconfig }}"
+          file_path: "${{ env.vaultfile }}"
+          debug: "false"
+
+      - name: "VAULT:SECRET:RETRIEVAL:MULTIPATH"
+        uses: tillster/github-actions/utility_vault_secrets_to_masked_env@v1
+        with:
+          vault_paths: "${{ env.mysql_users_vault_path }}/${{ env.vaultpath }}"
+          vault_pod: "${{ env.vault_pod }}"
+          vault_namespace: "${{ env.vault_namespace }}"
+          kubeconfig_location: "${{ env.generated_kubeconfig }}"
+          vault_token: "${{ secrets.TILLSTER_VAULT_TOKEN }}"
+          debug: "false"
+
+      - name: Connect to database
+        run: |
+          mysql_host="${{ env.mysql_host }}"
+          root_user="${{ env.database_username_root_user }}"
+          root_password="${{ env.database_username_root_password }}"
+          if mysql --ssl-mode=DISABLED -h "${mysql_host}" -u "${root_user}" -p"${root_password}" -e "select now() from dual;" ; then
+            echo "Connection successful!"
+          else
+            echo "Connection failed!"
+          fi
+      - name: List Users
+        run: |
+          mysql_host="${{ env.mysql_host }}"
+          root_user="${{ env.database_username_root_user }}"
+          root_password="${{ env.database_username_root_password }}"
+          echo "Listing all users in the database:"
+          mysql --ssl-mode=DISABLED -h "${mysql_host}" -u "${root_user}" -p"${root_password}" -e "SELECT user, host FROM mysql.user;"
